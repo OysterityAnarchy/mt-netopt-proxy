@@ -76,7 +76,7 @@ func proxy(src, dest *rudp.Peer) {
 	for {
 		pkt, err := src.Recv()
 		if err != nil {
-			if err == rudp.ErrClosed {
+			if err == net.ErrClosed {
 				break
 			}
 			continue
