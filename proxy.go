@@ -25,11 +25,11 @@ SOFTWARE.
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"regexp"
 
 	"github.com/anon55555/mt/rudp"
 )
@@ -71,7 +71,7 @@ func main() {
 }
 
 func proxy(src, dest *rudp.Peer) {
-	invLists := make(map[string][]string)
+	invLists := make(map[string][][]byte)
 
 	for {
 		pkt, err := src.Recv()
@@ -83,7 +83,10 @@ func proxy(src, dest *rudp.Peer) {
 		}
 
 		if src.IsSrv() && len(pkt.Data) >= 2 && pkt.Data[0] == 0 && pkt.Data[1] == 39 {
-			pkt.Data = append(pkt.Data[:2], keep(string(pkt.Data[2:]), invLists)...)
+			var b bytes.Buffer
+			b.Write(pkt.Data[:2])
+			keep(&b, pkt.Data[2:], invLists)
+			pkt.Data = b.Bytes()
 		}
 
 		dest.Send(pkt)
@@ -93,43 +96,47 @@ func proxy(src, dest *rudp.Peer) {
 	dest.Close()
 }
 
-var InvListRe = regexp.MustCompile("(?m)^(List ([^ ]*).*\nWidth .*\n)((Empty\n|Item .*\n)*)EndInventoryList\n")
+func keep(b *bytes.Buffer, inv []byte, lists map[string][][]byte) {
+	for {
+		ln := getln(&inv)
+		if len(ln) == 0 {
+			break
+		}
+		b.Write(ln)
 
-func getln(p *string) string {
-	var ln []byte
-	for c := byte(0); c != '\n' && len(*p) > 0; *p = (*p)[1:] {
-		c = (*p)[0]
-		ln = append(ln, c)
+		if bytes.HasPrefix(ln, []byte("List ")) {
+			var (
+				nm string
+				sz int
+			)
+			fmt.Sscanf(string(ln), "List %s %d", &nm, &sz)
+			b.Write(getln(&inv)) // Width
+			stks := make([][]byte, sz)
+			for i := range stks {
+				stks[i] = getln(&inv)
+				if i < len(lists[nm]) && bytes.Equal(stks[i], lists[nm][i]) {
+					b.WriteString("Keep\n")
+				} else {
+					b.Write(stks[i])
+				}
+			}
+			lists[nm] = stks
+		}
 	}
-	return string(ln)
 }
 
-func keep(inv string, lists map[string][]string) string {
-	return InvListRe.ReplaceAllStringFunc(inv, func(list string) string {
-		match := InvListRe.FindStringSubmatch(list)
-
-		newinv := match[1]
-
-		var items []string
-		for {
-			ln := getln(&match[3])
-			if len(ln) == 0 {
-				break
-			}
-			items = append(items, ln)
+func getln(p *[]byte) []byte {
+	for i, c := range *p {
+		if c == '\n' {
+			defer func() {
+				*p = (*p)[i+1:]
+			}()
+			return (*p)[:i+1]
 		}
+	}
 
-		olditems := lists[match[2]]
-		for i := range items {
-			if i < len(olditems) && items[i] == olditems[i] {
-				newinv += "Keep\n"
-				continue
-			}
-			newinv += items[i]
-		}
-		lists[match[2]] = items
-
-		newinv += "EndInventoryList\n"
-		return newinv
-	})
+	defer func() {
+		*p = nil
+	}()
+	return *p
 }
