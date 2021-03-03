@@ -26,6 +26,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -76,7 +77,7 @@ func proxy(src, dest *rudp.Peer) {
 	for {
 		pkt, err := src.Recv()
 		if err != nil {
-			if err == net.ErrClosed {
+			if errors.Is(err, net.ErrClosed) {
 				break
 			}
 			continue
