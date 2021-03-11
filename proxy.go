@@ -127,13 +127,11 @@ func keep(b *bytes.Buffer, inv []byte, lists map[string][][]byte) {
 }
 
 func getln(p *[]byte) []byte {
-	for i, c := range *p {
-		if c == '\n' {
-			defer func() {
-				*p = (*p)[i+1:]
-			}()
-			return (*p)[:i+1]
-		}
+	if i := bytes.IndexByte(*p, '\n'); i != -1 {
+		defer func() {
+			*p = (*p)[i+1:]
+		}()
+		return (*p)[:i+1]
 	}
 
 	defer func() {
