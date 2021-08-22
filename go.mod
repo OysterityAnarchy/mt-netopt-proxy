@@ -1,4 +1,4 @@
-module mt-netopt-proxy
+module github.com/ClamityAnarchy/mt-netopt-proxy
 
 go 1.16
 
