@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -20,7 +21,7 @@ type Conn struct {
 	lists map[string][][]byte
 }
 
-func (c *Conn) proxy(src, dest *rudp.Peer) {
+func (c *Conn) proxy(src, dest *rudp.Conn) {
 	for {
 		pkt, err := src.Recv()
 		if err != nil {
@@ -30,60 +31,70 @@ func (c *Conn) proxy(src, dest *rudp.Peer) {
 			continue
 		}
 
-		if len(pkt.Data) < 2 {
-			continue
-		}
-		cmd := binary.BigEndian.Uint16(pkt.Data)
-
-		c.mu.Lock()
-		switch {
-		case !src.IsSrv() && cmd == 49:
-			c.invAct(string(pkt.Data[2:]))
-		case src.IsSrv() && cmd == 39:
-			var b bytes.Buffer
-			b.Write(pkt.Data[:2])
-			c.keep(&b, pkt.Data[2:])
-			pkt.Data = b.Bytes()
-		}
-		c.mu.Unlock()
-
-		dest.Send(pkt)
+		c.processPkt(src, dest, pkt)
 	}
 
-	dest.SendDisco(0, true)
 	dest.Close()
+}
+
+func (c *Conn) processPkt(src, dest *rudp.Conn, pkt rudp.Pkt) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	buf := make([]byte, 2)
+	_, err := io.ReadFull(pkt, buf)
+	if err != nil {
+		return
+	}
+	cmd := binary.BigEndian.Uint16(buf)
+
+	if src.IsSrv() {
+		switch cmd {
+		case 39:
+			pkt.Reader = popen(c.keep, pkt)
+		}
+	} else {
+		switch cmd {
+		case 49:
+			act, err := io.ReadAll(pkt)
+			if err != nil {
+				return
+			}
+			c.invAct(string(act))
+			pkt.Reader = bytes.NewReader(act)
+		}
+	}
+
+	pkt.Reader = io.MultiReader(bytes.NewReader(buf), pkt)
+
+	dest.Send(pkt)
 }
 
 func main() {
 	if len(os.Args) != 3 {
-		fmt.Fprintln(os.Stderr, "usage: proxy dial:port listen:port")
+		fmt.Fprintln(os.Stderr, "usage:", os.Args[0], "dial:port listen:port")
 		os.Exit(1)
 	}
 
-	srvaddr, err := net.ResolveUDPAddr("udp", os.Args[1])
+	pc, err := net.ListenPacket("udp", os.Args[2])
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	lc, err := net.ListenPacket("udp", os.Args[2])
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer lc.Close()
-
-	l := rudp.Listen(lc)
+	l := rudp.Listen(pc)
 	for {
 		clt, err := l.Accept()
 		if err != nil {
 			continue
 		}
 
-		conn, err := net.DialUDP("udp", nil, srvaddr)
+		conn, err := net.Dial("udp", os.Args[1])
 		if err != nil {
+			log.Print(err)
 			clt.Close()
 			continue
 		}
-		srv := rudp.Connect(conn, conn.RemoteAddr())
+		srv := rudp.Connect(conn)
 
 		c := &Conn{lists: make(map[string][][]byte)}
 		go c.proxy(clt, srv)
@@ -91,13 +102,29 @@ func main() {
 	}
 }
 
-func (c *Conn) keep(b *bytes.Buffer, inv []byte) {
+func popen(f func(io.Writer, io.Reader), r io.Reader) io.Reader {
+	pr, pw := io.Pipe()
+	go func() {
+		f(pw, r)
+		pw.Close()
+	}()
+	return pr
+}
+
+var keepLine = []byte("Keep\n")
+
+func (c *Conn) keep(w io.Writer, r io.Reader) {
+	inv, err := io.ReadAll(r)
+	if err != nil {
+		return
+	}
+
 	for {
 		ln := getln(&inv)
 		if len(ln) == 0 {
 			break
 		}
-		b.Write(ln)
+		w.Write(ln)
 
 		if bytes.HasPrefix(ln, []byte("List ")) {
 			var (
@@ -105,14 +132,14 @@ func (c *Conn) keep(b *bytes.Buffer, inv []byte) {
 				sz int
 			)
 			fmt.Sscanf(string(ln), "List %s %d", &nm, &sz)
-			b.Write(getln(&inv)) // Width
+			w.Write(getln(&inv)) // Width
 			stks := make([][]byte, sz)
 			for i := range stks {
 				stks[i] = getln(&inv)
 				if i < len(c.lists[nm]) && bytes.Equal(stks[i], c.lists[nm][i]) {
-					b.WriteString("Keep\n")
+					w.Write(keepLine)
 				} else {
-					b.Write(stks[i])
+					w.Write(stks[i])
 				}
 			}
 			c.lists[nm] = stks
