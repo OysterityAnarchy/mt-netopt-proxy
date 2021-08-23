@@ -13,8 +13,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/anon55555/mt"
 	"github.com/anon55555/mt/rudp"
 )
+
+var be = binary.BigEndian
 
 type Conn struct {
 	mu    sync.Mutex
@@ -34,6 +37,15 @@ func (c *Conn) proxy(src, dest *rudp.Conn) {
 		c.processPkt(src, dest, pkt)
 	}
 
+	if src.IsSrv() {
+		if err := src.WhyClosed(); err != nil {
+			mt.Peer{dest}.SendCmd(&mt.ToCltDisco{
+				Reason: mt.Custom,
+				Custom: err.Error(),
+			})
+		}
+	}
+
 	dest.Close()
 }
 
@@ -46,7 +58,7 @@ func (c *Conn) processPkt(src, dest *rudp.Conn, pkt rudp.Pkt) {
 	if err != nil {
 		return
 	}
-	cmd := binary.BigEndian.Uint16(buf)
+	cmd := be.Uint16(buf)
 
 	if src.IsSrv() {
 		switch cmd {
@@ -90,7 +102,10 @@ func main() {
 
 		conn, err := net.Dial("udp", os.Args[1])
 		if err != nil {
-			log.Print(err)
+			mt.Peer{clt}.SendCmd(&mt.ToCltDisco{
+				Reason: mt.Custom,
+				Custom: err.Error(),
+			})
 			clt.Close()
 			continue
 		}
